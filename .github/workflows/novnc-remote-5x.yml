@@ -1,0 +1,72 @@
+name: novnc-remote-5x
+
+on:
+  workflow_dispatch:        # Elle "Run workflow" ile tetiklenir
+
+jobs:
+  remote:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false          # biri patlarsa digerleri devam etsin
+      matrix:
+        id: [1, 2, 3, 4, 5]     # 5 paralel makine
+    steps:
+      - name: TightVNC kur
+        shell: powershell
+        run: |
+          $url = "https://www.tightvnc.com/download/2.8.81/tightvnc-2.8.81-gpl-setup-64bit.msi"
+          Invoke-WebRequest -Uri $url -OutFile tightvnc.msi
+          $pw = "${{ secrets.VNC_PASSWORD }}"
+          msiexec /i tightvnc.msi /quiet /norestart `
+            ADDLOCAL=Server SERVER_REGISTER_AS_SERVICE=1 SERVER_ADD_FIREWALL_EXCEPTION=1 `
+            SET_USEVNCAUTHENTICATION=1 VALUE_OF_USEVNCAUTHENTICATION=1 `
+            SET_ALLOWLOOPBACK=1 VALUE_OF_ALLOWLOOPBACK=1 `
+            SET_PASSWORD=1 VALUE_OF_PASSWORD=$pw
+          Start-Sleep -Seconds 20
+          # Loopback baglantilarina izin ver (websockify localhost:5900'e baglaniyor)
+          reg add "HKLM\SOFTWARE\TightVNC\Server" /v AllowLoopback /t REG_DWORD /d 1 /f
+          Restart-Service tvnserver
+          Start-Sleep -Seconds 5
+          Get-Service tvnserver
+
+      - name: noVNC + websockify + cloudflared
+        shell: powershell
+        run: |
+          # --- noVNC + websockify ---
+          python -m pip install --upgrade pip
+          python -m pip install websockify
+          git clone --depth 1 https://github.com/novnc/noVNC.git
+          $noVNC = Join-Path $PWD "noVNC"
+          Start-Process python -ArgumentList "-m","websockify","--web","$noVNC","6080","localhost:5900" `
+            -RedirectStandardError ws.log -RedirectStandardOutput ws.out
+
+          # websockify gercekten 6080'i dinliyor mu?
+          $ok = $false
+          for ($i = 0; $i -lt 15; $i++) {
+            Start-Sleep -Seconds 2
+            if ((Test-NetConnection localhost -Port 6080 -WarningAction SilentlyContinue).TcpTestSucceeded) { $ok = $true; break }
+          }
+          Write-Host "websockify 6080 dinliyor mu: $ok"
+          if (-not $ok) { Get-Content ws.log, ws.out -ErrorAction SilentlyContinue; throw "websockify baslamadi" }
+
+          # --- cloudflared quick tunnel ---
+          $cf = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
+          Invoke-WebRequest -Uri $cf -OutFile cloudflared.exe
+          Start-Process .\cloudflared.exe -ArgumentList "tunnel","--no-autoupdate","--url","http://localhost:6080" `
+            -RedirectStandardError cf.log -RedirectStandardOutput cf.out
+
+          # URL cikana kadar bekle
+          $url = $null
+          for ($i = 0; $i -lt 30; $i++) {
+            Start-Sleep -Seconds 2
+            $m = Select-String -Path cf.log -Pattern "https://[a-z0-9-]+\.trycloudflare\.com" -ErrorAction SilentlyContinue
+            if ($m) { $url = $m.Matches[0].Value; break }
+          }
+          Write-Host "============= BAGLANTI (makine ${{ matrix.id }}) ============="
+          if ($url) { Write-Host "$url/vnc.html" } else { Get-Content cf.log -ErrorAction SilentlyContinue; Write-Host "URL bulunamadi" }
+          Write-Host "Sifre = VNC_PASSWORD secret degeri"
+          Write-Host "================================================="
+
+          # --- Oturumu acik tut (bu sure boyunca tunel canli kalir) ---
+          Start-Sleep -Seconds 1500
