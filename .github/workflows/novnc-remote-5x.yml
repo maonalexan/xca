@@ -6,7 +6,7 @@ on:
 jobs:
   remote:
     runs-on: windows-latest
-    timeout-minutes: 35
+    timeout-minutes: 65
     strategy:
       fail-fast: false          # biri patlarsa digerleri devam etsin
       matrix:
@@ -69,4 +69,4 @@ jobs:
           Write-Host "================================================="
 
           # --- Oturumu acik tut (bu sure boyunca tunel canli kalir) ---
-          Start-Sleep -Seconds 1500
+          Start-Sleep -Seconds 3600
